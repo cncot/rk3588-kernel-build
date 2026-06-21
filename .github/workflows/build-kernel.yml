@@ -7,25 +7,27 @@ on:
 
 env:
   KERNEL_COMMIT: b4ef083dc0c3608e744deabb43dc6b781aadbe6e
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
 
 jobs:
-  build-kernel:
+  build:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout workflow repo (has kernel_config)
-        uses: actions/checkout@v4
+      # Checkout our repo first (has kernel_config and workflow)
+      - uses: actions/checkout@v4
         with:
-          path: workflow-repo
+          path: repo
 
-      - name: Checkout Rockchip kernel source
-        uses: actions/checkout@v4
+      # Checkout Rockchip kernel source
+      - uses: actions/checkout@v4
         with:
           repository: rockchip-linux/kernel
           ref: ${{ env.KERNEL_COMMIT }}
-          path: kernel-source
+          path: kernel
           fetch-depth: 1
 
-      - name: Install build dependencies
+      - name: Install cross-compiler & build tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -34,54 +36,38 @@ jobs:
             kmod cpio device-tree-compiler python3 \
             build-essential
 
-      - name: Apply kernel config
+      - name: Apply kernel config (rknpu=m)
         run: |
-          cd kernel-source
-          cp ../workflow-repo/kernel_config .config
-          sed -i 's/CONFIG_ROCKCHIP_RKNPU=y/CONFIG_ROCKCHIP_RKNPU=m/' .config
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          grep CONFIG_ROCKCHIP_RKNPU .config
+          cp repo/kernel_config kernel/.config
+          sed -i 's/CONFIG_ROCKCHIP_RKNPU=y/CONFIG_ROCKCHIP_RKNPU=m/' kernel/.config
+          make -C kernel olddefconfig
+          grep CONFIG_ROCKCHIP_RKNPU kernel/.config
 
-      - name: Build kernel Image + DTBs
+      - name: Build kernel Image + dtbs + modules
         run: |
-          cd kernel-source
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs 2>&1 | tail -10
+          make -C kernel -j$(nproc) Image dtbs modules
           echo "=== Image ==="
-          ls -lh arch/arm64/boot/Image
-
-      - name: Build kernel modules (including rknpu.ko)
-        run: |
-          cd kernel-source
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules 2>&1 | tail -10
+          ls -lh kernel/arch/arm64/boot/Image
           echo "=== rknpu.ko ==="
-          find . -name "rknpu.ko" -ls
+          find kernel -name "rknpu.ko" -ls
 
-      - name: Build kernel deb packages (optional)
+      - name: Build .deb packages
         run: |
-          cd kernel-source || true
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- bindeb-pkg 2>&1 | tail -10 || echo "Deb packaging skipped (non-fatal)"
+          make -C kernel -j$(nproc) bindeb-pkg || echo "deb packaging optional"
+          ls -lh ../*.deb 2>/dev/null || true
 
       - name: Package artifacts
         run: |
           mkdir -p artifacts
-          # Kernel Image
-          cp -v kernel-source/arch/arm64/boot/Image artifacts/ || echo "No Image"
-          # Kernel config
-          cp -v kernel-source/.config artifacts/kernel.config || echo "No config"
-          # rknpu.ko
-          find kernel-source -name "rknpu.ko" -exec cp -v {} artifacts/ \; || echo "No rknpu.ko"
-          # All .deb files from parent
-          find $GITHUB_WORKSPACE -maxdepth 2 -name "*.deb" -exec cp -v {} artifacts/ \; || true
-          # Also look in kernel-source parent
-          find kernel-source/.. -maxdepth 1 -name "*.deb" -exec cp -v {} artifacts/ \; 2>/dev/null || true
-          echo "=== Artifacts ==="
+          cp -v kernel/arch/arm64/boot/Image artifacts/
+          find kernel -name "rknpu.ko" -exec cp -v {} artifacts/ \;
+          cp -v kernel/.config artifacts/kernel.config
+          cp -v ../*.deb artifacts/ 2>/dev/null || true
           ls -lh artifacts/
-          echo "=== Total ==="
-          du -sh artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rk3588-kernel-rknpu-v0.9.8
+          name: rk3588-kernel
           path: artifacts/
           retention-days: 30

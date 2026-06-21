@@ -1,0 +1,73 @@
+name: Build RK3588 Kernel with rknpu v0.9.8
+
+on:
+  workflow_dispatch:       # manual trigger
+  push:
+    branches: [ "main" ]   # auto on push
+
+env:
+  KERNEL_REPO: https://github.com/rockchip-linux/kernel.git
+  KERNEL_BRANCH: develop-6.1
+  KERNEL_COMMIT: b4ef083dc0c3608e744deabb43dc6b781aadbe6e
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: rockchip-linux/kernel
+          ref: ${{ env.KERNEL_COMMIT }}
+          fetch-depth: 1
+
+      - name: Install cross-compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev make \
+            kmod cpio device-tree-compiler \
+            python3 python3-pip
+          aarch64-linux-gnu-gcc --version | head -1
+
+      - name: Apply kernel config
+        run: |
+          cp kernel_config .config
+          # Ensure rknpu is module
+          sed -i 's/CONFIG_ROCKCHIP_RKNPU=y/CONFIG_ROCKCHIP_RKNPU=m/' .config
+          # Update config for new kernel options
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep CONFIG_ROCKCHIP_RKNPU .config
+
+      - name: Build kernel
+        run: |
+          # Build kernel Image, DTBs, and modules
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs 2>&1 | tail -20
+
+      - name: Build kernel deb packages
+        run: |
+          # Create deb packages for easy installation
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            bindeb-pkg 2>&1 | tail -20
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+          # Find generated .deb packages
+          find .. -maxdepth 1 -name "*.deb" -exec cp {} artifacts/ \;
+          # Also copy the Image and modules for direct use
+          cp arch/arm64/boot/Image artifacts/
+          cp .config artifacts/kernel.config
+          # Show what we built
+          ls -lh artifacts/
+          echo "=== rknpu module ==="
+          find . -name "rknpu.ko" -exec ls -lh {} \;
+          find . -name "rknpu.ko" -exec cp {} artifacts/ \;
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-kernel-rknpu-v0.9.8
+          path: artifacts/
+          retention-days: 30

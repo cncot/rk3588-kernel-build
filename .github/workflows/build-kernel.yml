@@ -29,15 +29,34 @@ jobs:
       - name: Patch kernel - add EXPORT_SYMBOL_GPL for iommu_get_dma_cookie/iommu_put_dma_cookie
         run: |
           cd kernel
-          # Check if iommu_get_dma_cookie has EXPORT_SYMBOL
-          if ! grep -q "EXPORT_SYMBOL.*iommu_get_dma_cookie" drivers/iommu/dma-iommu.c; then
-            echo "Adding EXPORT_SYMBOL_GPL for iommu_get_dma_cookie..."
-            sed -i '/^int iommu_get_dma_cookie/,/^}/a EXPORT_SYMBOL_GPL(iommu_get_dma_cookie);' drivers/iommu/dma-iommu.c
-          fi
-          if ! grep -q "EXPORT_SYMBOL.*iommu_put_dma_cookie" drivers/iommu/dma-iommu.c; then
-            echo "Adding EXPORT_SYMBOL_GPL for iommu_put_dma_cookie..."
-            sed -i '/^void iommu_put_dma_cookie/,/^}/a EXPORT_SYMBOL_GPL(iommu_put_dma_cookie);' drivers/iommu/dma-iommu.c
-          fi
+          python3 -c "
+import sys
+with open('drivers/iommu/dma-iommu.c', 'r') as f:
+    content = f.read()
+
+# Check if already patched
+if 'EXPORT_SYMBOL.*iommu_get_dma_cookie' in open('drivers/iommu/dma-iommu.c').read():
+    print('Already patched, skipping')
+    sys.exit(0)
+
+# Add after iommu_get_dma_cookie (closing brace before iommu_get_msi_cookie doc)
+content = content.replace(
+    '\treturn 0;\n}\n\n/**\n * iommu_get_msi_cookie',
+    '\treturn 0;\n}\nEXPORT_SYMBOL_GPL(iommu_get_dma_cookie);\n\n/**\n * iommu_get_msi_cookie',
+    1
+)
+
+# Add after iommu_put_dma_cookie (closing brace before iommu_dma_get_resv_regions doc)
+content = content.replace(
+    '\tdomain->iova_cookie = NULL;\n}\n\n/**\n * iommu_dma_get_resv_regions',
+    '\tdomain->iova_cookie = NULL;\n}\nEXPORT_SYMBOL_GPL(iommu_put_dma_cookie);\n\n/**\n * iommu_dma_get_resv_regions',
+    1
+)
+
+with open('drivers/iommu/dma-iommu.c', 'w') as f:
+    f.write(content)
+print('Patched successfully')
+"
           grep "EXPORT_SYMBOL.*iommu_.*_dma_cookie" drivers/iommu/dma-iommu.c || echo "WARNING: EXPORT not applied!"
 
 

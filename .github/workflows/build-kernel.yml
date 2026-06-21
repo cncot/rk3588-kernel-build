@@ -66,7 +66,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             bc bison flex libssl-dev make \
             kmod cpio device-tree-compiler python3 \
-            build-essential
+            build-essential u-boot-tools
 
       - name: Apply kernel config (rknpu=m)
         run: |

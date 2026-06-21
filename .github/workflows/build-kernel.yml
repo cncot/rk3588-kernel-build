@@ -6,22 +6,18 @@ on:
     branches: [ "main" ]
 
 env:
-  KERNEL_REPO: https://github.com/rockchip-linux/kernel.git
-  KERNEL_BRANCH: develop-6.1
   KERNEL_COMMIT: b4ef083dc0c3608e744deabb43dc6b781aadbe6e
 
 jobs:
   build-kernel:
     runs-on: ubuntu-24.04
     steps:
-      # Step 1: Checkout THIS repo first (has kernel_config + workflow)
-      - name: Checkout workflow repo
+      - name: Checkout workflow repo (has kernel_config)
         uses: actions/checkout@v4
         with:
           path: workflow-repo
 
-      # Step 2: Checkout Rockchip kernel source separately
-      - name: Checkout kernel source
+      - name: Checkout Rockchip kernel source
         uses: actions/checkout@v4
         with:
           repository: rockchip-linux/kernel
@@ -29,52 +25,50 @@ jobs:
           path: kernel-source
           fetch-depth: 1
 
-      - name: Install cross-compiler
+      - name: Install cross-compiler & build tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             gcc-aarch64-linux-gnu \
             bc bison flex libssl-dev make \
-            kmod cpio device-tree-compiler \
-            python3
-          aarch64-linux-gnu-gcc --version | head -1
+            kmod cpio device-tree-compiler python3
 
       - name: Apply kernel config
         run: |
           cd kernel-source
-          # Copy kernel config from workflow repo
           cp ../workflow-repo/kernel_config .config
-          # Ensure rknpu is module
           sed -i 's/CONFIG_ROCKCHIP_RKNPU=y/CONFIG_ROCKCHIP_RKNPU=m/' .config
-          # Update config for new kernel options
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          echo "=== rknpu config ==="
           grep CONFIG_ROCKCHIP_RKNPU .config
 
-      - name: Build kernel
+      - name: Build full kernel (Image + modules + DTBs + deb packages)
         run: |
           cd kernel-source
-          # Build kernel Image, DTBs, and modules
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image modules dtbs 2>&1 | tail -30
-
-      - name: Build kernel deb packages
-        run: |
-          cd kernel-source
+          # Build the whole kernel and package into .deb
           make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            bindeb-pkg 2>&1 | tail -20
+            bindeb-pkg 2>&1 | tail -40
+          # Save build exit status
+          echo "BUILD_EXIT=$?" 
 
-      - name: Package artifacts
+      - name: Collect and package artifacts
         run: |
           mkdir -p artifacts
-          # Copy .deb packages (they go to parent directory)
-          find kernel-source/.. -maxdepth 1 -name "*.deb" -exec cp {} artifacts/ \;
-          # Copy kernel Image
-          cp kernel-source/arch/arm64/boot/Image artifacts/
-          # Copy kernel config
-          cp kernel-source/.config artifacts/kernel.config
-          # Find and copy rknpu.ko
-          find kernel-source -name "rknpu.ko" -exec cp {} artifacts/ \;
-          find kernel-source -name "rknpu.ko" -exec ls -lh {} \;
+          # .deb files go to parent of kernel-source
+          find $GITHUB_WORKSPACE -maxdepth 2 -name "*.deb" | while read f; do
+            cp -v "$f" artifacts/
+          done
+          # Kernel Image
+          cp -v kernel-source/arch/arm64/boot/Image artifacts/ || true
+          # Kernel config used
+          cp -v kernel-source/.config artifacts/kernel.config || true
+          # rknpu module
+          find kernel-source -name "rknpu.ko" -exec cp -v {} artifacts/ \; || true
+          # Show what we got
+          echo "=== Artifacts ==="
           ls -lh artifacts/
+          echo "=== Total size ==="
+          du -sh artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

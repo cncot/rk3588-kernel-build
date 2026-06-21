@@ -26,6 +26,20 @@ jobs:
           ref: ${{ env.KERNEL_COMMIT }}
           path: kernel
           fetch-depth: 1
+      - name: Patch kernel - add EXPORT_SYMBOL_GPL for iommu_get_dma_cookie/iommu_put_dma_cookie
+        run: |
+          cd kernel
+          # Check if iommu_get_dma_cookie has EXPORT_SYMBOL
+          if ! grep -q "EXPORT_SYMBOL.*iommu_get_dma_cookie" drivers/iommu/dma-iommu.c; then
+            echo "Adding EXPORT_SYMBOL_GPL for iommu_get_dma_cookie..."
+            sed -i '/^int iommu_get_dma_cookie/,/^}/a EXPORT_SYMBOL_GPL(iommu_get_dma_cookie);' drivers/iommu/dma-iommu.c
+          fi
+          if ! grep -q "EXPORT_SYMBOL.*iommu_put_dma_cookie" drivers/iommu/dma-iommu.c; then
+            echo "Adding EXPORT_SYMBOL_GPL for iommu_put_dma_cookie..."
+            sed -i '/^void iommu_put_dma_cookie/,/^}/a EXPORT_SYMBOL_GPL(iommu_put_dma_cookie);' drivers/iommu/dma-iommu.c
+          fi
+          grep "EXPORT_SYMBOL.*iommu_.*_dma_cookie" drivers/iommu/dma-iommu.c || echo "WARNING: EXPORT not applied!"
+
 
       - name: Install cross-compiler & build tools
         run: |

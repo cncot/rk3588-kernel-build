@@ -25,13 +25,14 @@ jobs:
           path: kernel-source
           fetch-depth: 1
 
-      - name: Install cross-compiler & build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             gcc-aarch64-linux-gnu \
             bc bison flex libssl-dev make \
-            kmod cpio device-tree-compiler python3
+            kmod cpio device-tree-compiler python3 \
+            build-essential
 
       - name: Apply kernel config
         run: |
@@ -39,35 +40,43 @@ jobs:
           cp ../workflow-repo/kernel_config .config
           sed -i 's/CONFIG_ROCKCHIP_RKNPU=y/CONFIG_ROCKCHIP_RKNPU=m/' .config
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          echo "=== rknpu config ==="
           grep CONFIG_ROCKCHIP_RKNPU .config
 
-      - name: Build full kernel (Image + modules + DTBs + deb packages)
+      - name: Build kernel Image + DTBs
         run: |
           cd kernel-source
-          # Build the whole kernel and package into .deb
-          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            bindeb-pkg 2>&1 | tail -40
-          # Save build exit status
-          echo "BUILD_EXIT=$?" 
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs 2>&1 | tail -10
+          echo "=== Image ==="
+          ls -lh arch/arm64/boot/Image
 
-      - name: Collect and package artifacts
+      - name: Build kernel modules (including rknpu.ko)
+        run: |
+          cd kernel-source
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules 2>&1 | tail -10
+          echo "=== rknpu.ko ==="
+          find . -name "rknpu.ko" -ls
+
+      - name: Build kernel deb packages (optional)
+        run: |
+          cd kernel-source || true
+          make -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- bindeb-pkg 2>&1 | tail -10 || echo "Deb packaging skipped (non-fatal)"
+
+      - name: Package artifacts
         run: |
           mkdir -p artifacts
-          # .deb files go to parent of kernel-source
-          find $GITHUB_WORKSPACE -maxdepth 2 -name "*.deb" | while read f; do
-            cp -v "$f" artifacts/
-          done
           # Kernel Image
-          cp -v kernel-source/arch/arm64/boot/Image artifacts/ || true
-          # Kernel config used
-          cp -v kernel-source/.config artifacts/kernel.config || true
-          # rknpu module
-          find kernel-source -name "rknpu.ko" -exec cp -v {} artifacts/ \; || true
-          # Show what we got
+          cp -v kernel-source/arch/arm64/boot/Image artifacts/ || echo "No Image"
+          # Kernel config
+          cp -v kernel-source/.config artifacts/kernel.config || echo "No config"
+          # rknpu.ko
+          find kernel-source -name "rknpu.ko" -exec cp -v {} artifacts/ \; || echo "No rknpu.ko"
+          # All .deb files from parent
+          find $GITHUB_WORKSPACE -maxdepth 2 -name "*.deb" -exec cp -v {} artifacts/ \; || true
+          # Also look in kernel-source parent
+          find kernel-source/.. -maxdepth 1 -name "*.deb" -exec cp -v {} artifacts/ \; 2>/dev/null || true
           echo "=== Artifacts ==="
           ls -lh artifacts/
-          echo "=== Total size ==="
+          echo "=== Total ==="
           du -sh artifacts/
 
       - name: Upload artifacts

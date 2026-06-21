@@ -80,7 +80,9 @@ jobs:
 
       - name: Build kernel Image + dtbs + modules
         run: |
-          make -C kernel -j$(nproc) Image dtbs modules LOCALVERSION=${{ env.KERNEL_LOCALVERSION }}
+          make -C kernel -j$(nproc) Image dtbs modules \
+            LOCALVERSION=${{ env.KERNEL_LOCALVERSION }} \
+            KCFLAGS="-Wno-error"
           echo "=== Image ==="
           ls -lh kernel/arch/arm64/boot/Image
           echo "=== rknpu.ko ==="

@@ -69,19 +69,27 @@ jobs:
           echo "=== rknpu.ko ==="
           find kernel -name "rknpu.ko" -ls
 
-      - name: Build .deb packages
+      - name: Package full kernel (Image + dtbs + modules + rknpu)
         run: |
-          make -C kernel -j$(nproc) bindeb-pkg || echo "deb packaging optional"
-          ls -lh ../*.deb 2>/dev/null || true
-
-      - name: Package artifacts
-        run: |
-          mkdir -p artifacts
+          KREL=$(make -C kernel -s kernelrelease 2>/dev/null || echo "6.1.141")
+          echo "Kernel release: $KREL"
+          mkdir -p artifacts/lib/modules
+          # Image
           cp -v kernel/arch/arm64/boot/Image artifacts/
+          # dtbs - preserve rockchip subdir structure
+          mkdir -p artifacts/dtb/rockchip
+          cp -v kernel/arch/arm64/boot/dts/rockchip/*.dtb artifacts/dtb/rockchip/ 2>/dev/null || true
+          # rknpu.ko
           find kernel -name "rknpu.ko" -exec cp -v {} artifacts/ \;
+          # All kernel modules
+          make -C kernel modules_install INSTALL_MOD_PATH=$PWD/artifacts
+          # Remove source/debug to save space
+          rm -rf artifacts/lib/modules/*/source artifacts/lib/modules/*/build
+          # Config
           cp -v kernel/.config artifacts/kernel.config
-          cp -v ../*.deb artifacts/ 2>/dev/null || true
-          ls -lh artifacts/
+          echo "=== Artifact contents ==="
+          du -sh artifacts/ && find artifacts/ -type f | wc -l
+          du -sh artifacts/lib/modules/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

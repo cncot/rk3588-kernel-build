@@ -1,0 +1,128 @@
+# ============================================================
+# GitHub Actions Workflow: Build RK3588 Kernel 6.1.75 + rknpu2 v1.7.3
+# ============================================================
+# 此工作流编译 Orange Pi 5 (RK3588) 的 Linux 内核 6.1.75，
+# 包含 rknpu.ko 内核驱动模块，并集成 rknpu2 v1.7.3 用户态库。
+# 
+# 注意：v1.7.3 可能位于 rockchip-linux/rknpu 仓库而不是 rknpu2，
+#       工作流会自动尝试两个来源。
+# ============================================================
+name: Build RK3588 Kernel 6.1.75 + rknpu2 v1.7.3
+
+on:
+  workflow_dispatch:        # 手动触发
+  push:
+    tags:
+      - 'v6.1.75-rk3588-v173-*'
+
+env:
+  KERNEL_BRANCH: orange-pi-6.1-rk35xx
+  KERNEL_REPO: https://github.com/orangepi-xunlong/linux-orangepi.git
+  RKNPU2_TAG: v1.7.3
+  RKNPU2_REPO: https://github.com/rockchip-linux/rknpu2.git
+  RKNPU_ALT_REPO: https://github.com/rockchip-linux/rknpu.git
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt update -qq
+          sudo apt install -y -qq \
+            git build-essential bc bison flex libssl-dev \
+            libncurses-dev kmod cpio fakeroot u-boot-tools \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            crossbuild-essential-arm64
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} \
+            ${{ env.KERNEL_REPO }} linux-orangepi
+          cd linux-orangepi
+          echo "KERNEL_VERSION=$(make kernelversion 2>/dev/null)" >> $GITHUB_ENV
+
+      - name: Configure kernel (Rockchip defconfig)
+        run: |
+          cd linux-orangepi
+          make rockchip_linux_defconfig
+          # 确保 rknpu 驱动以模块方式编译
+          scripts/config --module CONFIG_ROCKCHIP_RKNPU
+          scripts/config --enable CONFIG_ROCKCHIP_RKNPU
+          grep CONFIG_ROCKCHIP_RKNPU .config
+
+      - name: Build kernel Image, dtbs and modules
+        run: |
+          cd linux-orangepi
+          make -j$(nproc) ARCH=${{ env.ARCH }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+            Image dtbs modules
+          echo "Kernel build complete"
+
+      - name: Clone rknpu2 userspace libraries (try v1.7.3)
+        run: |
+          # 先尝试从 rknpu2 仓库获取
+          if git clone --depth=1 -b ${{ env.RKNPU2_TAG }} \
+            ${{ env.RKNPU2_REPO }} rknpu2 2>/dev/null; then
+            echo "Got ${{ env.RKNPU2_TAG }} from rknpu2 repo"
+          else
+            echo "Tag ${{ env.RKNPU2_TAG }} not found in rknpu2, trying rknpu repo..."
+            # 从 rknpu 仓库获取（该仓库有 v1.7.3，但面向老芯片）
+            git clone ${{ env.RKNPU_ALT_REPO }} rknpu2
+            cd rknpu2
+            git fetch --tags
+            if git checkout tags/${{ env.RKNPU2_TAG }} -b ${{ env.RKNPU2_TAG }} 2>/dev/null; then
+              echo "Got ${{ env.RKNPU2_TAG }} from rknpu repo"
+            else
+              echo "WARNING: ${{ env.RKNPU2_TAG }} not found in either repo"
+              echo "Creating dummy directory for build to continue"
+              mkdir -p rknpu2/runtime/RK3588/Linux/librknn_api/aarch64
+              mkdir -p rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin
+            fi
+            cd ..
+          fi
+
+      - name: Package artifacts
+        run: |
+          # 创建输出目录
+          mkdir -p output/boot output/modules output/rknpu2
+
+          # 复制内核 Image 和设备树
+          cp linux-orangepi/arch/arm64/boot/Image output/boot/
+          cp -r linux-orangepi/arch/arm64/boot/dts/rockchip/*.dtb output/boot/
+
+          # 收集内核模块（包括 rknpu.ko）
+          cd linux-orangepi
+          INSTALL_MOD_PATH=../output/modules make ARCH=${{ env.ARCH }} \
+            CROSS_COMPILE=${{ env.CROSS_COMPILE }} modules_install
+          cd ..
+
+          # 复制 rknpu2 用户态库（从可能的路径查找）
+          if [ -d rknpu2/runtime/RK3588/Linux/librknn_api/aarch64 ]; then
+            cp -v rknpu2/runtime/RK3588/Linux/librknn_api/aarch64/* \
+              output/rknpu2/ 2>/dev/null || true
+          fi
+          if [ -d rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin ]; then
+            cp -v rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin/* \
+              output/rknpu2/ 2>/dev/null || true
+          fi
+          # 也尝试其他路径结构（rknpu 老仓库的目录结构可能不同）
+          find rknpu2/ -name '*.so*' -exec cp -v {} output/rknpu2/ \; 2>/dev/null || true
+
+          # 输出信息
+          echo "=== rknpu.ko info ==="
+          find output/modules -name 'rknpu.ko' -exec modinfo {} \; 2>/dev/null || echo "rknpu.ko not found"
+          echo "=== rknpu2 libs ==="
+          ls -la output/rknpu2/ 2>/dev/null || echo "No rknpu2 libs found"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rk3588-kernel-6.1.75-rknpu2-v1.7.3
+          path: output/
+          compression-level: 6

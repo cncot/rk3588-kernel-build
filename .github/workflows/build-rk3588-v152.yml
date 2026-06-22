@@ -1,108 +1,138 @@
 # ============================================================
-# GitHub Actions Workflow: Build RK3588 Kernel 6.1.75 + rknpu2 v1.5.2
-# ============================================================
-# 此工作流编译 Orange Pi 5 (RK3588) 的 Linux 内核 6.1.75，
-# 包含 rknpu.ko 内核驱动模块，并集成 rknpu2 v1.5.2 用户态库。
+# Build RK3588 Kernel 6.1.75 + rknpu2 v1.5.2
+# 参考 cncot/rk3588-kernel-build/build-kernel.yml 成功模板
 # ============================================================
 name: Build RK3588 Kernel 6.1.75 + rknpu2 v1.5.2
 
 on:
-  workflow_dispatch:        # 手动触发
+  workflow_dispatch:
   push:
-    tags:
-      - 'v6.1.75-rk3588-v152-*'
+    branches: [ "main" ]
+    paths:
+      - '.github/workflows/build-rk3588-v152.yml'
 
 env:
+  KERNEL_REPO: orangepi-xunlong/linux-orangepi
   KERNEL_BRANCH: orange-pi-6.1-rk35xx
-  KERNEL_REPO: https://github.com/orangepi-xunlong/linux-orangepi.git
-  RKNPU2_TAG: v1.5.2
-  RKNPU2_REPO: https://github.com/rockchip-linux/rknpu2.git
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
+  KERNEL_SUBLEVEL: 75
+  KERNEL_LOCALVERSION: -vendor-rk35xx
+  RKNPU2_TAG: v1.5.2
+  RKNPU2_REPO: rockchip-linux/rknpu2
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          path: repo
 
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt update -qq
-          sudo apt install -y -qq \
-            git build-essential bc bison flex libssl-dev \
-            libncurses-dev kmod cpio fakeroot u-boot-tools \
-            device-tree-compiler gcc-aarch64-linux-gnu \
-            crossbuild-essential-arm64
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_BRANCH }}
+          path: kernel
+          fetch-depth: 1
 
-      - name: Clone kernel source
+      - name: Fix SUBLEVEL to match running kernel
         run: |
-          git clone --depth=1 -b ${{ env.KERNEL_BRANCH }} \
-            ${{ env.KERNEL_REPO }} linux-orangepi
-          cd linux-orangepi
-          echo "KERNEL_VERSION=$(make kernelversion 2>/dev/null)" >> $GITHUB_ENV
+          cd kernel
+          OLD=$(grep "^SUBLEVEL" Makefile | awk '{print $NF}')
+          echo "Current SUBLEVEL: $OLD -> Target: ${{ env.KERNEL_SUBLEVEL }}"
+          sed -i "s/^SUBLEVEL = $OLD/SUBLEVEL = ${{ env.KERNEL_SUBLEVEL }}/" Makefile
+          grep "^SUBLEVEL" Makefile
 
-      - name: Configure kernel (Rockchip defconfig)
+      - name: Patch dma-iommu.c - export iommu_get/put_dma_cookie
         run: |
-          cd linux-orangepi
-          make rockchip_linux_defconfig
-          # 确保 rknpu 驱动以模块方式编译
-          scripts/config --module CONFIG_ROCKCHIP_RKNPU
-          scripts/config --enable CONFIG_ROCKCHIP_RKNPU
-          grep CONFIG_ROCKCHIP_RKNPU .config
+          cd kernel
+          python3 -u -c '
+          with open("drivers/iommu/dma-iommu.c","r") as f:
+              c = f.read()
+          if "EXPORT_SYMBOL_GPL(iommu_get_dma_cookie)" in c:
+              print("already patched, skip")
+              import sys; sys.exit(0)
+          c = c.replace("\treturn 0;\n}\n\n/**\n * iommu_get_msi_cookie",
+              "\treturn 0;\n}\nEXPORT_SYMBOL_GPL(iommu_get_dma_cookie);\n\n/**\n * iommu_get_msi_cookie")
+          c = c.replace("\tdomain->iova_cookie = NULL;\n}\n\n/**\n * iommu_dma_get_resv_regions",
+              "\tdomain->iova_cookie = NULL;\n}\nEXPORT_SYMBOL_GPL(iommu_put_dma_cookie);\n\n/**\n * iommu_dma_get_resv_regions")
+          with open("drivers/iommu/dma-iommu.c","w") as f:
+              f.write(c)
+          print("patched OK")
+          '
+          grep "EXPORT_SYMBOL.*iommu_.*_dma_cookie" drivers/iommu/dma-iommu.c
 
-      - name: Build kernel Image, dtbs and modules
+      - name: Install cross-compiler & build tools
         run: |
-          cd linux-orangepi
-          make -j$(nproc) ARCH=${{ env.ARCH }} \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            gcc-aarch64-linux-gnu \
+            bc bison flex libssl-dev make \
+            kmod cpio device-tree-compiler python3 \
+            build-essential u-boot-tools
+
+      - name: Apply kernel config (rknpu=m)
+        run: |
+          cp repo/kernel_config kernel/.config
+          make -C kernel olddefconfig ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+          grep CONFIG_ROCKCHIP_RKNPU kernel/.config
+
+      - name: Build kernel Image + dtbs + modules
+        run: |
+          make -C kernel -j$(nproc) Image dtbs modules \
+            ARCH=${{ env.ARCH }} \
             CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
-            Image dtbs modules
-          echo "Build complete"
+            LOCALVERSION=${{ env.KERNEL_LOCALVERSION }} \
+            KCFLAGS="-Wno-error"
+          echo "=== Image ==="
+          ls -lh kernel/arch/arm64/boot/Image
+          echo "=== rknpu.ko ==="
+          find kernel -name "rknpu.ko" -ls
 
-      - name: Clone rknpu2 userspace libraries
+      - name: Verify rknpu.ko version
+        run: |
+          MODPATH=$(find kernel -name "rknpu.ko" -print -quit)
+          echo "Checking: $MODPATH"
+          ${CROSS_COMPILE}objdump -p "$MODPATH" 2>/dev/null | grep -i "vermagic" || \
+          modinfo "$MODPATH" 2>/dev/null | head -5 || \
+          strings "$MODPATH" | grep -E "vermagic|version" | head -5
+
+      - name: Clone rknpu2 userspace libs
         run: |
           git clone --depth=1 -b ${{ env.RKNPU2_TAG }} \
-            ${{ env.RKNPU2_REPO }} rknpu2 || \
-          git clone ${{ env.RKNPU2_REPO }} rknpu2 && \
-            cd rknpu2 && \
-            git fetch --tags && \
-            git checkout tags/${{ env.RKNPU2_TAG }} -b ${{ env.RKNPU2_TAG }}
+            https://github.com/${{ env.RKNPU2_REPO }}.git rknpu2 || \
+          ( git clone https://github.com/${{ env.RKNPU2_REPO }}.git rknpu2 && \
+            cd rknpu2 && git fetch --tags && \
+            git checkout tags/${{ env.RKNPU2_TAG }} -b ${{ env.RKNPU2_TAG }} )
 
       - name: Package artifacts
         run: |
-          # 创建输出目录
-          mkdir -p output/boot output/modules output/rknpu2
-
-          # 复制内核 Image 和设备树
-          cp linux-orangepi/arch/arm64/boot/Image output/boot/
-          cp -r linux-orangepi/arch/arm64/boot/dts/rockchip/*.dtb output/boot/
-
-          # 收集内核模块（包括 rknpu.ko）
-          cd linux-orangepi
-          INSTALL_MOD_PATH=../output/modules make ARCH=${{ env.ARCH }} \
-            CROSS_COMPILE=${{ env.CROSS_COMPILE }} modules_install
-          cd ..
-
-          # 复制 rknpu2 用户态库
+          KREL=$(make -C kernel -s kernelrelease \
+            LOCALVERSION=${{ env.KERNEL_LOCALVERSION }} 2>/dev/null)
+          echo "Kernel release: $KREL"
+          mkdir -p artifacts/lib/modules artifacts/rknpu2
+          cp -v kernel/arch/arm64/boot/Image artifacts/
+          mkdir -p artifacts/dtb/rockchip
+          cp -v kernel/arch/arm64/boot/dts/rockchip/*.dtb artifacts/dtb/rockchip/ 2>/dev/null || true
+          find kernel -name "rknpu.ko" -exec cp -v {} artifacts/ \;
+          make -C kernel modules_install \
+            INSTALL_MOD_PATH=$PWD/artifacts \
+            LOCALVERSION=${{ env.KERNEL_LOCALVERSION }}
+          cp kernel/.config artifacts/kernel.config
           if [ -d rknpu2/runtime/RK3588/Linux/librknn_api/aarch64 ]; then
-            cp -v rknpu2/runtime/RK3588/Linux/librknn_api/aarch64/* \
-              output/rknpu2/
+            cp -v rknpu2/runtime/RK3588/Linux/librknn_api/aarch64/* artifacts/rknpu2/
           fi
           if [ -d rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin ]; then
-            cp -v rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin/* \
-              output/rknpu2/
+            cp -v rknpu2/runtime/RK3588/Linux/rknn_server/aarch64/usr/bin/* artifacts/rknpu2/
           fi
-
-          # 输出信息
-          echo "=== rknpu.ko info ==="
-          find output/modules -name 'rknpu.ko' -exec modinfo {} \;
-          echo "=== rknpu2 libs ==="
-          ls -la output/rknpu2/
+          echo "=== artifacts ==="
+          find artifacts -type f | head -30
+          du -sh artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: rk3588-kernel-6.1.75-rknpu2-v1.5.2
-          path: output/
-          compression-level: 6
+          path: artifacts/
+          retention-days: 7

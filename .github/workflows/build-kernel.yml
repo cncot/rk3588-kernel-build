@@ -1,17 +1,15 @@
-name: Build RK3588 Kernel with rknpu v0.9.8 (Orange Pi 5 Plus)
+name: Build RK3588 Kernel with rknpu v0.9.8 PURE (no patches)
 
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: [ "pure-098-test" ]
 
 env:
-  # Orange Pi kernel source (linux-orangepi), orange-pi-6.1-rk35xx branch
   KERNEL_REPO: orangepi-xunlong/linux-orangepi
   KERNEL_BRANCH: orange-pi-6.1-rk35xx
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
-  # Version to patch into Makefile (match running kernel)
   KERNEL_SUBLEVEL: 75
   KERNEL_LOCALVERSION: -vendor-rk35xx
 
@@ -19,12 +17,10 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # Checkout our repo first (has kernel_config and workflow)
       - uses: actions/checkout@v4
         with:
           path: repo
 
-      # Checkout Orange Pi kernel source
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.KERNEL_REPO }}
@@ -41,7 +37,7 @@ jobs:
           sed -i "s/^SUBLEVEL = $OLD_SUBLEVEL/SUBLEVEL = ${{ env.KERNEL_SUBLEVEL }}/" Makefile
           grep "^SUBLEVEL" Makefile
 
-      - name: Patch kernel - add EXPORT_SYMBOL_GPL for iommu_get_dma_cookie/iommu_put_dma_cookie
+      - name: Patch kernel - add EXPORT_SYMBOL_GPL for iommu_get/put_dma_cookie
         run: |
           cd kernel
           python3 -u -c '
@@ -88,44 +84,31 @@ jobs:
           echo "=== rknpu.ko ==="
           find kernel -name "rknpu.ko" -ls
 
-      - name: Verify rknpu.ko version
+      - name: Verify rknpu.ko srcversion
         run: |
-          # Check modinfo of the built rknpu.ko
-          if [ -f kernel/drivers/rknpu/rknpu.ko ]; then
-            MODPATH=kernel/drivers/rknpu/rknpu.ko
-          else
-            MODPATH=$(find kernel -name "rknpu.ko" -print -quit)
-          fi
-          echo "Checking: $MODPATH"
-          ${CROSS_COMPILE}objdump -p "$MODPATH" 2>/dev/null | grep -i "vermagic\|rknpu" || \
-          modinfo "$MODPATH" 2>/dev/null | head -5 || \
-          strings "$MODPATH" | grep -E "vermagic|version" | head -5
+          MODPATH=$(find kernel -name "rknpu.ko" -print -quit)
+          echo "Module: $MODPATH"
+          strings "$MODPATH" | grep -E "vermagic|srcversion" || true
+          modinfo "$MODPATH" 2>/dev/null | grep -E "srcversion|version" || true
 
-      - name: Package full kernel (Image + dtbs + modules + rknpu)
+      - name: Package kernel (pure 0.9.8, no patches)
         run: |
           KREL=$(make -C kernel -s kernelrelease LOCALVERSION=${{ env.KERNEL_LOCALVERSION }} 2>/dev/null)
           echo "Kernel release: $KREL"
           mkdir -p artifacts/lib/modules
-          # Image
           cp -v kernel/arch/arm64/boot/Image artifacts/
-          # dtbs - preserve rockchip subdir structure
           mkdir -p artifacts/dtb/rockchip
           cp -v kernel/arch/arm64/boot/dts/rockchip/*.dtb artifacts/dtb/rockchip/ 2>/dev/null || true
-          # rknpu.ko (standalone for easy deployment)
           find kernel -name "rknpu.ko" -exec cp -v {} artifacts/ \;
-          # All modules (for full install)
           make -C kernel modules_install INSTALL_MOD_PATH=$PWD/artifacts LOCALVERSION=${{ env.KERNEL_LOCALVERSION }}
-          # Save .config for reference
           cp kernel/.config artifacts/kernel.config
-          # Fix up module path name (kernelrelease might differ)
-          echo "=== artifacts tree ==="
-          find artifacts -type f | head -30
-          echo "=== disk usage ==="
+          echo "=== artifacts ==="
+          find artifacts -type f | head -20
           du -sh artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rk3588-kernel-rknpu-mod
+          name: rk3588-kernel-v098-pure
           path: artifacts/
           retention-days: 7

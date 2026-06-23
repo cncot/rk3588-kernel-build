@@ -3,7 +3,7 @@ name: Build RK3588 Kernel with rknpu v0.9.8 (Orange Pi 5 Plus)
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "fix-iova-leak" ]
 
 env:
   # Orange Pi kernel source (linux-orangepi), orange-pi-6.1-rk35xx branch
@@ -19,7 +19,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # Checkout our repo first (has kernel_config and workflow)
+      # Checkout our repo first (has kernel_config, patches, and workflow)
       - uses: actions/checkout@v4
         with:
           path: repo
@@ -59,6 +59,22 @@ jobs:
           '
           grep "EXPORT_SYMBOL.*iommu_.*_dma_cookie" drivers/iommu/dma-iommu.c
 
+      # ====== APPLY IOVA LEAK FIX PATCHES TO rknpu DRIVER ======
+      - name: Apply rknpu driver IOVA leak fix patches
+        run: |
+          cd kernel
+          echo "=== Applying rknpu_drv.patch (IOVA fix + RV1126B support) ==="
+          patch -p1 < ../repo/patches/rknpu_drv.patch || echo "PATCH FAILED FOR rknpu_drv"
+          echo "=== Applying rknpu_mem.patch (DMA buf lifecycle fix) ==="
+          patch -p1 < ../repo/patches/rknpu_mem.patch || echo "PATCH FAILED FOR rknpu_mem"
+          echo "=== Applying rknpu_iommu.patch (CONFIG_ARM guard) ==="
+          patch -p1 < ../repo/patches/rknpu_iommu.patch || echo "PATCH FAILED FOR rknpu_iommu"
+          echo "=== Applying rknpu_devfreq.patch (SCMI fix + RV1126B) ==="
+          patch -p1 < ../repo/patches/rknpu_devfreq.patch || echo "PATCH FAILED FOR rknpu_devfreq"
+          echo "=== Verify patches applied ==="
+          grep -n "dma_buf_vunmap" drivers/rknpu/rknpu_drv.c drivers/rknpu/rknpu_mem.c
+          grep -n "kern_addr_valid" drivers/rknpu/rknpu_mem.c
+
       - name: Install cross-compiler & build tools
         run: |
           sudo apt-get update -qq
@@ -90,7 +106,6 @@ jobs:
 
       - name: Verify rknpu.ko version
         run: |
-          # Check modinfo of the built rknpu.ko
           if [ -f kernel/drivers/rknpu/rknpu.ko ]; then
             MODPATH=kernel/drivers/rknpu/rknpu.ko
           else
@@ -100,6 +115,8 @@ jobs:
           ${CROSS_COMPILE}objdump -p "$MODPATH" 2>/dev/null | grep -i "vermagic\|rknpu" || \
           modinfo "$MODPATH" 2>/dev/null | head -5 || \
           strings "$MODPATH" | grep -E "vermagic|version" | head -5
+          echo "=== Verify srcversion ==="
+          modinfo "$MODPATH" 2>/dev/null | grep srcversion || echo "modinfo not available"
 
       - name: Package full kernel (Image + dtbs + modules + rknpu)
         run: |
@@ -117,7 +134,6 @@ jobs:
           make -C kernel modules_install INSTALL_MOD_PATH=$PWD/artifacts LOCALVERSION=${{ env.KERNEL_LOCALVERSION }}
           # Save .config for reference
           cp kernel/.config artifacts/kernel.config
-          # Fix up module path name (kernelrelease might differ)
           echo "=== artifacts tree ==="
           find artifacts -type f | head -30
           echo "=== disk usage ==="

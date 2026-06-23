@@ -1,0 +1,11 @@
+--- a/drivers/rknpu/rknpu_iommu.c
++++ b/drivers/rknpu/rknpu_iommu.c
+@@ -364,7 +364,7 @@
+ 	}
+ }
+ 
+-#if defined(CONFIG_IOMMU_API) && defined(CONFIG_NO_GKI)
++#if defined(CONFIG_IOMMU_API) && defined(CONFIG_NO_GKI) && !defined(CONFIG_ARM)
+ 
+ #if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
+ struct iommu_group {
